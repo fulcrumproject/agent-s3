@@ -1,0 +1,41 @@
+# Additional isolated fixtures for the unchanged-core acceptance suite.
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:6f30057d31f5861b66f3545d4821f987aacf1dd920765f0acadea0c58ff975b1
+    environment:
+      POSTGRES_USER: s3test
+      POSTGRES_DB: s3test
+      POSTGRES_PASSWORD: ${CORE_TEST_DB_PASSWORD:?generate the local core environment}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U s3test -d s3test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - core-data:/var/lib/postgresql/data
+    networks: [control]
+  core:
+    image: fulcrum-agent-s3-core-test:3212fc7
+    build:
+      context: .local/core-build
+      dockerfile: ../../tests/core.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FULCRUM_PORT: "8080"
+      FULCRUM_PUBLIC_BASE_URL: "http://127.0.0.1:18000"
+      FULCRUM_DB_DSN: "host=postgres user=s3test password=${CORE_TEST_DB_PASSWORD} dbname=s3test port=5432 sslmode=disable"
+      FULCRUM_METRIC_DB_DSN: "host=postgres user=s3test password=${CORE_TEST_DB_PASSWORD} dbname=s3test port=5432 sslmode=disable"
+      FULCRUM_SCHEDULER_LOCKER_DB_DSN: "host=postgres user=s3test password=${CORE_TEST_DB_PASSWORD} dbname=s3test port=5432 sslmode=disable"
+      FULCRUM_VAULT_ENCRYPTION_KEY: ${CORE_TEST_VAULT_KEY:?generate the local core environment}
+      FULCRUM_LOG_LEVEL: "ERROR"
+      FULCRUM_LOG_FORMAT: "json"
+      FULCRUM_JOB_MAINTENANCE: "true"
+      FULCRUM_JOB_MAINTENANCE_INTERVAL: "2s"
+      FULCRUM_JOB_TIMEOUT_INTERVAL: "5m"
+    ports:
+      - "127.0.0.1:18000:8080"
+    networks: [control]
+volumes:
+  core-data:

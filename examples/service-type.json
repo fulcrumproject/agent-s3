@@ -1,0 +1,235 @@
+{
+  "name": "s3-bucket",
+  "propertySchema": {
+    "properties": {
+      "quotaBytes": {
+        "type": "integer",
+        "label": "Quota (bytes)",
+        "required": true,
+        "validators": [
+          {
+            "type": "min",
+            "config": {
+              "value": 1
+            }
+          },
+          {
+            "type": "max",
+            "config": {
+              "value": 9007199254740991
+            }
+          }
+        ]
+      },
+      "secretAccessKey": {
+        "type": "string",
+        "label": "Customer secret (ephemeral)",
+        "required": true,
+        "secret": {
+          "type": "ephemeral"
+        },
+        "validators": [
+          {
+            "type": "minLength",
+            "config": {
+              "value": 8
+            }
+          }
+        ]
+      }
+    },
+    "validators": []
+  },
+  "lifecycleSchema": {
+    "states": [
+      {
+        "name": "New"
+      },
+      {
+        "name": "CreateFailed"
+      },
+      {
+        "name": "Active"
+      },
+      {
+        "name": "Suspended"
+      },
+      {
+        "name": "DeleteFailed"
+      },
+      {
+        "name": "Deleted"
+      }
+    ],
+    "actions": [
+      {
+        "name": "create",
+        "transitions": [
+          {
+            "from": "New",
+            "to": "Active"
+          },
+          {
+            "from": "New",
+            "to": "CreateFailed",
+            "onError": true
+          },
+          {
+            "from": "CreateFailed",
+            "to": "Active"
+          },
+          {
+            "from": "CreateFailed",
+            "to": "CreateFailed",
+            "onError": true
+          }
+        ]
+      },
+      {
+        "name": "update",
+        "transitions": [
+          {
+            "from": "New",
+            "to": "Active"
+          },
+          {
+            "from": "New",
+            "to": "New",
+            "onError": true
+          },
+          {
+            "from": "CreateFailed",
+            "to": "Active"
+          },
+          {
+            "from": "CreateFailed",
+            "to": "CreateFailed",
+            "onError": true
+          },
+          {
+            "from": "Active",
+            "to": "Active"
+          },
+          {
+            "from": "Active",
+            "to": "Active",
+            "onError": true
+          },
+          {
+            "from": "Suspended",
+            "to": "Suspended"
+          },
+          {
+            "from": "Suspended",
+            "to": "Suspended",
+            "onError": true
+          }
+        ]
+      },
+      {
+        "name": "suspend",
+        "transitions": [
+          {
+            "from": "Active",
+            "to": "Suspended"
+          },
+          {
+            "from": "Active",
+            "to": "Active",
+            "onError": true
+          },
+          {
+            "from": "Suspended",
+            "to": "Suspended"
+          },
+          {
+            "from": "Suspended",
+            "to": "Suspended",
+            "onError": true
+          }
+        ]
+      },
+      {
+        "name": "resume",
+        "transitions": [
+          {
+            "from": "Suspended",
+            "to": "Active"
+          },
+          {
+            "from": "Suspended",
+            "to": "Suspended",
+            "onError": true
+          },
+          {
+            "from": "Active",
+            "to": "Active"
+          },
+          {
+            "from": "Active",
+            "to": "Active",
+            "onError": true
+          }
+        ]
+      },
+      {
+        "name": "delete",
+        "transitions": [
+          {
+            "from": "New",
+            "to": "Deleted"
+          },
+          {
+            "from": "New",
+            "to": "DeleteFailed",
+            "onError": true
+          },
+          {
+            "from": "CreateFailed",
+            "to": "Deleted"
+          },
+          {
+            "from": "CreateFailed",
+            "to": "DeleteFailed",
+            "onError": true
+          },
+          {
+            "from": "Active",
+            "to": "Deleted"
+          },
+          {
+            "from": "Active",
+            "to": "DeleteFailed",
+            "onError": true
+          },
+          {
+            "from": "Suspended",
+            "to": "Deleted"
+          },
+          {
+            "from": "Suspended",
+            "to": "DeleteFailed",
+            "onError": true
+          },
+          {
+            "from": "DeleteFailed",
+            "to": "Deleted"
+          },
+          {
+            "from": "DeleteFailed",
+            "to": "DeleteFailed",
+            "onError": true
+          }
+        ]
+      }
+    ],
+    "initialState": "New",
+    "terminateState": "Deleted",
+    "terminalStates": [
+      "Deleted"
+    ],
+    "runningStates": [
+      "Active"
+    ]
+  }
+}

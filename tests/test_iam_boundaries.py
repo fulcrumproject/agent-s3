@@ -6,7 +6,7 @@ import secrets
 import unittest
 import uuid
 
-from backend_contract import admin, expect_admin, fixture_credentials
+from backend_contract import admin, expect_admin, fixture_credentials, signed_request, require_fixtures
 
 
 def restricted_policy(bucket):
@@ -19,14 +19,16 @@ def restricted_policy(bucket):
 
 class IAMBoundaryTests(unittest.TestCase):
     def setUp(self):
+        require_fixtures()
         self.endpoint = "http://127.0.0.1:" + str(int(os.environ.get("RUSTFS_TEST_PORT", "19000")))
+        self.customer_endpoint = "http://127.0.0.1:" + str(int(os.environ.get("S3_CLIENT_PORT", "19080")))
         self.root_key, self.root_secret = fixture_credentials()
 
     def root_call(self, method, route, query=None, body=None):
         return expect_admin(self.endpoint, self.root_key, self.root_secret, method, route, query, body)
 
-    def test_explicit_admin_deny_prevents_iam_self_secret_change(self):
-        """Data-only IAM credentials must not change their own secret through an admin route."""
+    def test_customer_boundary_prevents_iam_self_secret_change(self):
+        """The gateway, not the backend self-service policy, must enforce this denial."""
         identity = uuid.uuid4().hex
         key, secret, replacement = "fc" + identity, secrets.token_hex(32), secrets.token_hex(32)
         policy_name = "fc-boundary-" + identity
@@ -39,19 +41,20 @@ class IAMBoundaryTests(unittest.TestCase):
             user_created = True
             self.root_call("PUT", "set-user-or-group-policy",
                            {"policyName": policy_name, "userOrGroup": key, "isGroup": "false"})
-            status, _ = admin(self.endpoint, key, secret, "POST", "account/password",
+            status, _ = admin(self.customer_endpoint, key, secret, "POST", "account/password",
                               body={"current_secret_key": secret, "new_secret_key": replacement})
             replacement_status, _ = admin(self.endpoint, key, replacement, "GET", "account/info")
             self.assertEqual(status, 403,
                              "self-service mutation was not denied; new credential authentication HTTP "
                              + str(replacement_status))
+            self.assertEqual(replacement_status, 403, "denied mutation changed the backend secret")
         finally:
             if user_created:
                 self.root_call("DELETE", "remove-user", {"accessKey": key})
             self.root_call("DELETE", "remove-canned-policy", {"name": policy_name})
 
     def test_restricted_service_account_cannot_delete_sibling(self):
-        """Do not use a shared administrative parent unless sibling credentials remain isolated."""
+        """The customer boundary must block even the known shared-parent backend fallback."""
         created = []
         try:
             for _ in range(2):
@@ -65,7 +68,7 @@ class IAMBoundaryTests(unittest.TestCase):
                 created.append((key, secret))
             key_a, secret_a = created[0]
             key_b, _ = created[1]
-            status, _ = admin(self.endpoint, key_a, secret_a, "DELETE", "delete-service-account",
+            status, _ = admin(self.customer_endpoint, key_a, secret_a, "DELETE", "delete-service-account",
                               {"accessKey": key_b})
             remaining_status, _ = admin(self.endpoint, self.root_key, self.root_secret,
                                         "GET", "info-service-account", {"accessKey": key_b})
@@ -79,6 +82,23 @@ class IAMBoundaryTests(unittest.TestCase):
                                   "GET", "info-service-account", {"accessKey": key})
                 if status == 200:
                     self.root_call("DELETE", "delete-service-account", {"accessKey": key})
+
+    def test_gateway_rejects_admin_route_aliases_even_with_root_signature(self):
+        # Root signing is intentional: these denials must come from the boundary, not IAM.
+        for path in (
+            "/rustfs/admin/v3/list-users",
+            "/minio/admin/v3/list-users",
+            "//rustfs/admin/v3/list-users",
+            "/rustfs//admin/v3/list-users",
+            "/%72ustfs/admin/v3/list-users",
+            "/rustfs%2fadmin%2fv3%2flist-users",
+            "/fulcrum-probe/../rustfs/admin/v3/list-users",
+            "/fulcrum-probe/%2e%2e/rustfs/admin/v3/list-users",
+        ):
+            with self.subTest(path=path):
+                status, _ = signed_request(self.customer_endpoint, self.root_key, self.root_secret,
+                                            "GET", path)
+                self.assertIn(status, (400, 403), "administrative route reached the backend")
 
 
 if __name__ == "__main__":

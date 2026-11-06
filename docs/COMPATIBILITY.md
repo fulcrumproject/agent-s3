@@ -1,7 +1,11 @@
 # Verifica iniziale RustFS 1.0.4
 
-**Esito: prerequisiti S3 parzialmente verificati; requisito di amministrazione
-esclusiva dell'agent non soddisfatto dal modello IAM provato. Agent non implementato.**
+**Aggiornamento: confine cliente verificato con il gateway HTTP approvato.**
+
+Questo documento conserva l'indagine iniziale sul backend diretto. I suoi comportamenti
+IAM non sono stati modificati: il contratto ora richiede che i clienti raggiungano solo
+il gateway, mentre l'agent usa l'endpoint amministrativo privato. L'agent Go è implementato;
+la suite completa e i relativi limiti sono in [VERIFICATION.md](VERIFICATION.md).
 
 ## Ambiente e riproducibilità
 
@@ -33,9 +37,8 @@ Comando: `.local/venv/bin/python tests/backend_contract.py`.
 - Rotazione amministrativa preserva policy; vecchio secret e URL prefirmato rifiutati.
 - Suspend/resume senza reinvio del secret.
 
-Questa non è ancora la verifica completa del contratto. Non sono ancora verificati:
-agent, core end-to-end, AWS CLI, concorrenza, multipart grande e quota, copie/sovrascritture,
-force delete/versioni, crash e assenza di secret nei log dell'agent.
+Queste erano le prove preliminari, non la verifica completa del contratto. Le prove
+aggiunte sull'agent e sul core reale sono elencate separatamente in VERIFICATION.md.
 
 ## Differenze API riscontrate
 
@@ -48,8 +51,11 @@ force delete/versioni, crash e assenza di secret nei log dell'agent.
 
 ## Blocchi riprodotti: confini IAM
 
-Comando: `.local/venv/bin/python tests/test_iam_boundaries.py`.
-Le asserzioni esprimono il contratto; non sono marcate xfail né saltate.
+Le prove iniziali usavano direttamente RustFS. Il comando
+`.local/venv/bin/python tests/test_iam_boundaries.py` usa ora l'endpoint cliente
+(19080), mantenendo setup e controlli di stato sull'endpoint privato (19000).
+Le asserzioni non sono marcate xfail né saltate. Tre test passano attraverso il gateway,
+compresi gli alias dei percorsi amministrativi. Questo non è una correzione del backend.
 
 ### Utente IAM e cambio autonomo del secret
 
@@ -78,9 +84,13 @@ Il codice della release consente il fallback di ownership al parent. Questa
 prova riguarda il parent condiviso: non afferma che tutti i modelli IAM abbiano
 lo stesso comportamento. Non abbiamo adottato questa alternativa nell'agent.
 
-## Decisione necessaria
+## Decisione approvata
 
-Prima dell'implementazione occorre scegliere esplicitamente fra:
+L'utente ha scelto il confine di rete/API con gateway HTTP S3-only, senza TLS in questa fase.
+Il provider deve applicare lo stesso isolamento. Il runtime resta quello dell'agent VM,
+con utenti IAM dedicati; non sono stati adottati service account con parent condiviso.
+
+Le alternative considerate erano:
 
 - mantenere utenti IAM dedicati, ammettendo il cambio self-service del solo proprio
   secret (fermi isolamento, quota, divieto di altre identità e controllo amministrativo);
@@ -88,8 +98,9 @@ Prima dell'implementazione occorre scegliere esplicitamente fra:
   endpoint cliente S3 e API amministrative, da verificare e predisporre dal provider;
 - rivalutare backend/release.
 
-Nessuna eccezione adottata, nessun proxy aggiunto, nessuna modifica a RustFS, core o libreria.
-Nessun completamento del contratto o idoneità alla produzione dichiarati.
+Nessuna eccezione ai permessi adottata e nessuna modifica a RustFS, core o libreria.
+È stato aggiunto il solo gateway infrastrutturale autorizzato. Non è stata dichiarata
+idoneità alla produzione.
 
 ## Controlli del banco di prova
 
@@ -98,5 +109,7 @@ Nessun completamento del contratto o idoneità alla produzione dichiarati.
 - `docker compose --project-name fulcrum-s3-test --env-file .local/rustfs.env config --quiet`: superato.
 - `go mod verify`: superato (verifica dei moduli, non compilazione/test di un agent).
 - `.local/venv/bin/python tests/backend_contract.py`: superato dopo aver adattato il client al formato della release.
-- `.local/venv/bin/python tests/test_iam_boundaries.py`: due fallimenti riprodotti, riportati sopra.
-- Test Go, core end-to-end, build binario/immagine agent e suite completa: non eseguiti, implementazione sospesa.
+- I due fallimenti iniziali sul backend diretto sono riportati sopra.
+- `tests/test_iam_boundaries.py`: ora tre test superati sul confine cliente autorizzato.
+- `tests/network_boundary.sh`: backend non raggiungibile dalla rete cliente, anche per IP.
+- Test Go, core end-to-end, build e suite completa: vedere VERIFICATION.md.

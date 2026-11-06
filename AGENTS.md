@@ -2,7 +2,7 @@
 
 ## Stato e obiettivo
 
-Implementazione autorizzata del contratto in `docs/CONTRACT.md`, fermata al controllo preliminare IAM: leggere `docs/COMPATIBILITY.md` e ottenere la decisione aperta prima di scrivere l'agent. I test negativi sono attualmente fallenti e non vanno indeboliti. Leggere anche `README.md`; `docs/DESIGN-HISTORY.md` è solo lo storico.
+Agent implementato secondo `docs/CONTRACT.md`, con gateway HTTP S3-only autorizzato dopo l'indagine IAM. Leggere `README.md`, `docs/OPERATIONS.md` e `docs/VERIFICATION.md`. Il backend diretto conserva i limiti in `docs/COMPATIBILITY.md`: non rimuovere il confine di rete né indebolire i test. `docs/DESIGN-HISTORY.md` è solo lo storico.
 
 Stessa architettura di `../agent-proxmox-fae`, con stdagent e client RustFS separato. Non modificare core, libreria comune o altri repository.
 
@@ -38,4 +38,4 @@ Leggere eventuali `AGENTS.md` dei repository consultati. Il codice attuale preva
 
 Approvati: Apache-2.0, agent-lib-go/utils, AWS SDK Go v2, client amministrativo interno, RustFS 1.0.4 fissato per digest e force delete. HTTP solo nel banco di prova isolato. Secret cliente ephemeral, mai nei log/runtime/disco dell'agent. Licenza di utils da chiarire prima della distribuzione.
 
-Verifiche: `go test ./...`, `go test -race ./...`, `go vet ./...`, più test reali bloccanti indicati nel contratto. Nessun push di una consegna dichiarata completa senza evidenze; niente secret o dati locali in Git.
+Verifiche: `go test ./...`, `go test -race ./...`, `go vet ./...`, poi i comandi in `docs/VERIFICATION.md`. E2E usa un core pulito alla revisione in `tests/core-revision`, senza modificarlo. Non eseguire due suite E2E sullo stesso banco: il test ferma/riavvia il solo RustFS dedicato. Non stampare env, log grezzi o `docker compose config` senza `--quiet`. Niente secret o `.local`/`.pi` in Git; nessun push di una consegna completa senza evidenze.

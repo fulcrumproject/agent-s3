@@ -1,0 +1,14 @@
+[
+  {
+    "name": "s3.storage.used_bytes",
+    "entityType": "Service"
+  },
+  {
+    "name": "s3.storage.quota_bytes",
+    "entityType": "Service"
+  },
+  {
+    "name": "s3.storage.usage_ratio",
+    "entityType": "Service"
+  }
+]

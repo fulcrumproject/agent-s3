@@ -63,6 +63,18 @@ La configurazione dei timeout del banco di prova deve essere esplicita.
 Nessun secret persistente nascosto per aggirare questi limiti. Eventuali blocchi del backend
 o del core vanno riportati, non risolti cambiando gli altri repository.
 
+## Integrazione approvata dopo la verifica IAM
+
+L'utente ha autorizzato un gateway HTTP nel banco di prova e un analogo confine
+infrastrutturale predisposto dal provider. I clienti raggiungono soltanto l'endpoint
+S3 del gateway; l'endpoint amministrativo RustFS è privato e raggiungibile
+dall'agent/operatori fidati, non dai clienti. Nessun TLS in questa fase.
+Il gateway preserva firma e flusso S3, blocca API amministrative, self-service e STS.
+L'agent resta control-plane e non trasporta oggetti. Usare utenti IAM dedicati;
+non adottare service account con parent condiviso. Le prove IAM passano dal
+confine cliente; i comportamenti del backend diretto restano documentati.
+L'accesso diretto dei clienti a RustFS invalida il modello di sicurezza.
+
 ## Esclusioni
 
 Versioning/lifecycle/Object Lock/cifratura gestiti dal cliente, TLS e relativa infrastruttura,

@@ -8,10 +8,32 @@ services:
       RUSTFS_CONSOLE_ENABLE: "false"
       RUSTFS_ADDRESS: ":9000"
       RUSTFS_OBS_LOGGER_LEVEL: "error"
+      # Speed up accounting readiness for synthetic local tests; do not relax quota checks.
+      RUSTFS_SCANNER_SPEED: "fastest"
+      RUSTFS_SCANNER_CYCLE: "2"
     command: ["/data"]
     ports:
       - "127.0.0.1:${RUSTFS_TEST_PORT:-19000}:9000"
     volumes:
       - rustfs-data:/data
+    networks: [control]
+  gateway:
+    image: nginx:1.30.6-alpine@sha256:583b7f2fce1cdb8da5ad5c39ebd3c33b98b87d493190e548bdee1fa8c619c311
+    user: "101:101"
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:mode=1777"]
+    depends_on: [rustfs]
+    ports:
+      - "127.0.0.1:${S3_CLIENT_PORT:-19080}:8080"
+    volumes:
+      - ./deploy/gateway.conf:/etc/nginx/nginx.conf:ro,Z
+    networks: [control, clients]
+networks:
+  # Separate bridge; its only host publication is the trusted operator loopback port.
+  control: {}
+  clients: {}
 volumes:
   rustfs-data:

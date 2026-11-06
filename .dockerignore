@@ -1,0 +1,9 @@
+.git
+.pi
+.local
+.env
+.env.*
+bin
+coverage.out
+**/__pycache__
+**/*.pyc

@@ -1,0 +1,76 @@
+{
+  "name": "s3-rustfs",
+  "serviceTypeIds": [],
+  "configurationSchema": {
+    "properties": {
+      "rustfs": {
+        "type": "object",
+        "label": "RustFS",
+        "required": true,
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "label": "Private administrative/S3 endpoint",
+            "required": true,
+            "immutable": true
+          },
+          "clientEndpoint": {
+            "type": "string",
+            "label": "Customer S3-only gateway endpoint",
+            "required": true,
+            "immutable": true
+          },
+          "region": {
+            "type": "string",
+            "label": "S3 region",
+            "required": true,
+            "immutable": true,
+            "default": "us-east-1"
+          },
+          "accessKey": {
+            "type": "string",
+            "label": "Administrative access key",
+            "required": true,
+            "secret": {
+              "type": "persistent"
+            }
+          },
+          "secretKey": {
+            "type": "string",
+            "label": "Administrative secret",
+            "required": true,
+            "secret": {
+              "type": "persistent"
+            }
+          },
+          "httpTimeoutSeconds": {
+            "type": "integer",
+            "default": 15,
+            "validators": [
+              {
+                "type": "min",
+                "config": {
+                  "value": 1
+                }
+              }
+            ]
+          },
+          "operationTimeoutSeconds": {
+            "type": "integer",
+            "default": 180,
+            "validators": [
+              {
+                "type": "min",
+                "config": {
+                  "value": 15
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "validators": []
+  },
+  "configContentType": "application/json"
+}

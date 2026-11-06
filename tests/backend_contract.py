@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import subprocess
 import sys
 import time
 import urllib.error
@@ -15,6 +16,7 @@ import urllib.request
 import uuid
 
 import boto3
+import yaml
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from botocore.config import Config
@@ -26,22 +28,59 @@ class CheckFailure(Exception):
     pass
 
 
+def require_fixtures(need_core=False):
+    """Reject accidental use of an unrelated local server or a remote Docker daemon."""
+    if os.environ.get("DOCKER_HOST", "").strip() and not os.environ["DOCKER_HOST"].startswith("unix://"):
+        raise CheckFailure("acceptance requires a local Docker socket")
+    try:
+        context_host = subprocess.check_output(
+            ["docker", "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"],
+            stderr=subprocess.DEVNULL, text=True)
+        if not json.loads(context_host).startswith("unix://"):
+            raise CheckFailure("acceptance requires a local Docker context")
+        root = Path(__file__).resolve().parents[1]
+        definitions = yaml.safe_load((root / "compose.yaml").read_text())["services"]
+        checks = [("rustfs", "9000/tcp", str(int(os.environ.get("RUSTFS_TEST_PORT", "19000")))),
+                  ("gateway", "8080/tcp", str(int(os.environ.get("S3_CLIENT_PORT", "19080"))))]
+        if need_core:
+            definitions.update(yaml.safe_load((root / "compose.e2e.yaml").read_text())["services"])
+            checks.append(("core", "8080/tcp", "18000"))
+        template = '{"state":{{json .State.Status}},"labels":{{json .Config.Labels}},"ports":{{json .NetworkSettings.Ports}},"image":{{json .Config.Image}}}'
+        for service, container_port, host_port in checks:
+            raw = subprocess.check_output(["docker", "inspect", "--format", template,
+                                           "fulcrum-s3-test-" + service + "-1"],
+                                          stderr=subprocess.DEVNULL, text=True)
+            info = json.loads(raw)
+            if (info["state"] != "running" or
+                    info["labels"].get("com.docker.compose.project") != "fulcrum-s3-test" or
+                    info["labels"].get("com.docker.compose.service") != service or
+                    info["image"] != definitions[service]["image"] or
+                    info["ports"].get(container_port) != [{"HostIp": "127.0.0.1", "HostPort": host_port}]):
+                raise CheckFailure("fixture identity or loopback binding mismatch")
+    except (subprocess.SubprocessError, KeyError, ValueError, OSError):
+        raise CheckFailure("cannot verify the dedicated Docker fixtures; refusing API writes") from None
+
+
 def fixture_credentials():
     path = Path(__file__).resolve().parents[1] / ".local" / "rustfs.env"
     values = dict(line.split("=", 1) for line in path.read_text().splitlines() if "=" in line)
     return values["RUSTFS_ACCESS_KEY"], values["RUSTFS_SECRET_KEY"]
 
 
-def client(endpoint, key, secret):
+def client(endpoint, key, secret, attempts=1):
     return boto3.client("s3", endpoint_url=endpoint, aws_access_key_id=key,
                         aws_secret_access_key=secret, region_name="us-east-1",
                         config=Config(signature_version="s3v4", s3={"addressing_style": "path"},
                                       connect_timeout=3, read_timeout=10,
-                                      retries={"max_attempts": 0}))
+                                      retries={"mode": "standard", "total_max_attempts": attempts}))
 
 
 def admin(endpoint, key, secret, method, route, query=None, body=None):
-    url = endpoint + "/rustfs/admin/v3/" + route
+    return signed_request(endpoint, key, secret, method, "/rustfs/admin/v3/" + route, query, body)
+
+
+def signed_request(endpoint, key, secret, method, path, query=None, body=None):
+    url = endpoint + path
     if query:
         url += "?" + urllib.parse.urlencode(query)
     payload = b"" if body is None else json.dumps(body, separators=(",", ":")).encode()
@@ -92,7 +131,9 @@ def url_status(url, data=None):
 
 
 def run():
+    require_fixtures()
     endpoint = "http://127.0.0.1:" + os.environ.get("RUSTFS_TEST_PORT", "19000")
+    customer_endpoint = "http://127.0.0.1:" + str(int(os.environ.get("S3_CLIENT_PORT", "19080")))
     root_key, root_secret = fixture_credentials()
     root = client(endpoint, root_key, root_secret)
     identity = uuid.uuid4().hex
@@ -148,7 +189,7 @@ def run():
         created_user = True
         expect_admin(endpoint, root_key, root_secret, "PUT", "set-user-or-group-policy",
                      {"policyName": policy_name, "userOrGroup": key, "isGroup": "false"})
-        user = client(endpoint, key, secret)
+        user = client(customer_endpoint, key, secret)
         deny(lambda: user.list_objects_v2(Bucket=bucket))
         expect_admin(endpoint, root_key, root_secret, "PUT", "set-user-status", {"accessKey": key, "status": "enabled"})
         user.put_object(Bucket=bucket, Key="sample", Body=b"sample data")
@@ -163,18 +204,18 @@ def run():
         deny(lambda: user.put_object(Bucket=other, Key="forbidden", Body=b"no"))
         deny(lambda: user.put_bucket_tagging(Bucket=bucket, Tagging={"TagSet": [{"Key": "forged", "Value": "x"}]}))
         deny(lambda: user.put_bucket_policy(Bucket=bucket, Policy=json.dumps(policy)))
-        status, _ = admin(endpoint, key, secret, "PUT", "add-user", {"accessKey": key}, {"secretKey": secret, "status": "enabled"})
+        status, _ = admin(customer_endpoint, key, secret, "PUT", "add-user", {"accessKey": key}, {"secretKey": secret, "status": "enabled"})
         if status != 403:
             raise CheckFailure("customer add-user self-administration not denied (HTTP " + str(status) + ")")
         child = "fc-child-" + identity
-        status, _ = admin(endpoint, key, secret, "PUT", "add-service-account", body={
+        status, _ = admin(customer_endpoint, key, secret, "PUT", "add-service-account", body={
             "accessKey": child, "secretKey": secrets.token_hex(32), "policy": policy,
         })
         if status == 200:
             admin(endpoint, root_key, root_secret, "DELETE", "delete-service-account", {"accessKey": child})
         if status != 403:
             raise CheckFailure("customer creation of additional credentials not denied (HTTP " + str(status) + ")")
-        sts = boto3.client("sts", endpoint_url=endpoint, aws_access_key_id=key,
+        sts = boto3.client("sts", endpoint_url=customer_endpoint, aws_access_key_id=key,
                            aws_secret_access_key=secret, region_name="us-east-1",
                            config=Config(connect_timeout=3, read_timeout=10, retries={"max_attempts": 0}))
         try:
@@ -223,7 +264,7 @@ def run():
         deny(lambda: user.head_object(Bucket=bucket, Key="sample"))
         if url_status(presigned) != 403:
             raise CheckFailure("old presigned URL was not rejected with HTTP 403")
-        user = client(endpoint, key, replacement)
+        user = client(customer_endpoint, key, replacement)
         user.head_object(Bucket=bucket, Key="sample")
         deny(lambda: user.list_objects_v2(Bucket=other))
         print("PASS secret rotation and old URL rejection")
