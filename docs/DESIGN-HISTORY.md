@@ -1,99 +1,102 @@
-# Fulcrum agent-s3 — promemoria di progettazione
+# Archived design notes
 
-**Stato: progettazione sospesa; nessun codice implementato o test eseguito.**
+These notes describe the project **before implementation**. They are not current requirements;
+use the [service contract](CONTRACT.md), [operations guide](OPERATIONS.md) and
+[verification results](VERIFICATION.md) instead.
 
-Questo repository conserva il contesto per riprendere il lavoro in un'altra sessione. Nel frattempo si prosegue con `../agent-mysql`, per cui è stato scelto Docker come runtime. Incus è stato valutato e accantonato per ora: non è una dipendenza di questo progetto.
+At the time, implementation was paused while work continued on agent-mysql with Docker
+as its runtime. Incus had been considered and set aside; it was not a dependency of agent-s3.
 
-## Obiettivo
+## Original goal and decisions
 
-Realizzare un agent Fulcrum open source, integrato con il core, che fornisca servizi di object storage compatibili con S3.
+Build an open-source Fulcrum agent for S3-compatible object storage.
 
-## Decisioni approvate
+- Use a shared backend: one service represents one bucket and its credentials,
+  not a dedicated storage instance or container.
+- The provider deploys RustFS, optionally using Docker with persistent storage.
+- The agent manages buckets, credentials and quotas through APIs, potentially remotely.
+- Host, container and cluster management remain outside the initial scope.
+- Restrict customer credentials to their own bucket; never distribute administrative credentials.
+- Keep the MySQL and S3 agents separate. S3 operations do not justify a shared Docker library.
 
-- Modello **condiviso**: un servizio Fulcrum corrisponde a un bucket e alle relative credenziali, non a un'intera istanza storage dedicata.
-- **Backend RustFS predisposto dal provider**, eventualmente eseguito tramite Docker con storage persistente.
-- L'agent è responsabile di **bucket, credenziali e quote**. Installazione e gestione di host, container e cluster del backend non fanno parte del perimetro iniziale.
-- L'agent può essere remoto: usa le API del backend e non deve risiedere sull'host storage.
-- Le credenziali di un servizio devono essere limitate al proprio bucket; non consegnare credenziali amministrative ai clienti.
-- Agent MySQL e S3 restano progetti separati. Non occorre creare ora una libreria Docker comune: le normali operazioni dell'agent S3 non richiedono Docker.
-- Il lavoro S3 verrà ripreso in una sessione separata.
+These decisions did not yet define a complete implementation contract or validate RustFS
+for any particular workload.
 
-L'accettazione del modello non costituisce ancora un contratto completo di implementazione. RustFS rimane da validare sul carico e sulla release scelti.
+## Technical proposal at the time
 
-## Proposta tecnica da verificare
+- Use Go and agent-lib-go, following agent-proxmox-fae's architecture.
+- Use an S3 SDK for standard operations.
+- Use RustFS-specific administrative APIs for users, policies, credentials and quotas.
+- Configure an administrative endpoint and suitable credentials.
+- Return endpoint, bucket, optional region and secure access information through core mechanisms.
+- Define a bucket lifecycle rather than copying VM/container start and stop behavior.
 
-- Go con riuso di `../agent-lib-go`, seguendo la struttura di `../agent-proxmox-fae/internal/vmagent`.
-- SDK S3 per operazioni standard su bucket e oggetti.
-- API amministrative RustFS per utenti, policy, credenziali e quote: queste operazioni non sono automaticamente portabili ad altri server S3.
-- Configurazione dell'agent con endpoint e credenziali amministrative a privilegi minimi compatibili con le operazioni richieste.
-- Risultato del servizio: endpoint, nome bucket, eventuale region e informazioni per accedere alle credenziali tramite i meccanismi sicuri del core.
-- Lifecycle specifico per bucket: non copiare automaticamente start/stop delle VM o dei container.
+SDK selection, schemas, actions, states, metrics and secret delivery were still open.
 
-Non sono ancora scelti SDK, schema delle proprietà, azioni, stati, nomi delle metriche o modalità di consegna dei secret generati dall'agent. Verificare quest'ultima nel core prima di progettarla.
+## Findings from the initial research
 
-## Quanto emerso dalla ricerca su RustFS
+The documentation described Apache-2.0 licensing for RustFS, Docker/Podman deployment,
+IAM users/policies/service accounts/temporary credentials, a tested S3 API subset,
+and byte-based bucket quotas rather than request or performance quotas.
+The agent's own license had not yet been selected.
 
-La documentazione consultata descrive:
+The GitHub release API listed 1.0.4, published on October 25, 2026, without a prerelease flag.
+That was a research observation, not a version pin or a production qualification.
 
-- Licenza Apache 2.0 per RustFS; la licenza di questo agent resta da decidere.
-- Deployment tramite container Docker/Podman.
-- IAM con utenti, policy, service account e credenziali temporanee.
-- Un sottoinsieme testato dell'API S3, non equivalenza completa con Amazon S3.
-- Quote hard per bucket espresse in byte, non quote di richieste o prestazioni.
+### Historical quota warnings
 
-Al momento della ricerca, l'API GitHub delle release riportava `1.0.4`, pubblicata il 25 ottobre 2026 e non marcata come prerelease. **È solo un dato storico della ricerca, non una versione fissata né una garanzia di maturità.** Ricontrollare release e note prima di implementare.
+The documentation reviewed at that stage warned that:
 
-### Attenzione particolare alle quote
+- unreadable or invalid configuration could allow writes with
+  `Bucket quota check degraded to allow`;
+- usage statistics could lag behind changes;
+- overwrites could require free space for the complete replacement object;
+- quota preflight was advisory rather than a capacity reservation.
 
-La documentazione delle quote segnala che:
+These were reasons to test the selected release, especially concurrency and multipart.
+Later implementation checks found durable reservation support in 1.0.4; do not treat
+the historical warnings as a complete description of the current test target.
 
-- se la configurazione interna non può essere letta o interpretata, RustFS può permettere la scrittura ed emettere `Bucket quota check degraded to allow`;
-- le statistiche di utilizzo possono riflettere le modifiche con ritardo;
-- sovrascrivere un oggetto può richiedere spazio disponibile per l'intero nuovo oggetto;
-- il controllo preventivo della quota è consultivo, non una prenotazione di capacità.
+### Durability and isolation
 
-Non promettere quindi una quota invalicabile o una misura precisa per fatturazione senza verificare il comportamento della versione scelta, incluse scritture concorrenti e multipart.
+A persistent Docker volume is not a backup, replication or failover.
+Policy isolation is logical: CPU, I/O, storage capacity and failures remain shared.
+Storage topology, durability guarantees and recovery procedures belong to the provider.
 
-### Durabilità e isolamento
+## Questions that were open
 
-- Un volume Docker persistente non è un backup e non offre replica o failover.
-- L'isolamento tramite policy è logico: CPU, I/O, capacità e guasti del backend rimangono condivisi.
-- La topologia storage, le garanzie di durabilità e il piano di recupero sono responsabilità infrastrutturali da esplicitare, non capacità automaticamente fornite dall'agent.
+1. Required clients and S3 features: basic operations, multipart, presigned URLs,
+   versioning, lifecycle, encryption and Object Lock.
+2. RustFS release and deployment topology for development and verification.
+3. One or multiple backends per agent, and backend assignment.
+4. Service properties and actions.
+5. Credential count, generation, delivery, storage, rotation and revocation.
+6. Mandatory quota semantics, shared capacity and unavailable enforcement.
+7. Deletion of objects, versions, incomplete uploads and retained data.
+8. Idempotence and partial-failure recovery without touching unmanaged resources.
+9. Metrics, health and acceptance criteria.
+10. License, packaging and distribution.
 
-## Domande aperte per la prossima sessione
+## Proposed verification
 
-Affrontarle una alla volta, nell'ordine delle dipendenze; non sono requisiti approvati.
+- Two-service isolation across reads, writes and administrative operations.
+- Repeated creation and recovery without duplicate or orphaned resources.
+- Effective rotation and revocation, including previously signed requests where applicable.
+- Quotas on ordinary/multipart uploads, copies, overwrites and concurrent writes.
+- Restart persistence and a separately verified backup/restore procedure.
+- Backend outage and recovery without false success.
+- Deletion matching the chosen policy, including non-empty and versioned buckets.
 
-1. Quali client e funzionalità S3 sono indispensabili: operazioni base, multipart, URL presigned, versioning, lifecycle, cifratura, Object Lock?
-2. Quale release e topologia RustFS useremo per sviluppo e verifica? Quali garanzie operative offre il provider?
-3. Un'istanza di agent gestisce un solo backend o più endpoint/backend? Come si assegna il backend a un servizio?
-4. Quali proprietà e azioni espone il servizio: creazione, modifica quota, rotazione credenziali, sospensione, cancellazione?
-5. Una o più identità/chiavi per servizio? Come si generano, consegnano, custodiscono, ruotano e revocano senza esposizioni?
-6. La quota è obbligatoria e con quale semantica? Come gestire esaurimento della capacità condivisa e indisponibilità dell'enforcement?
-7. Cosa significa cancellare un servizio con oggetti, versioni, upload incompleti o retention attiva? Nessuna cancellazione forzata implicita.
-8. Come rendere le operazioni idempotenti e recuperabili dopo timeout o completamenti parziali, senza toccare bucket non gestiti?
-9. Quali metriche, segnali di salute e criteri di accettazione sono necessari?
-10. Quale licenza, packaging e modalità di distribuzione adottare per l'agent?
+These were proposed checks, not completed test results.
 
-## Verifiche raccomandate prima dell'adozione
+## Research references
 
-- Due servizi con bucket e credenziali distinti: il cliente A non può leggere, scrivere o amministrare le risorse di B.
-- Creazione ripetuta e ripresa dopo errore senza bucket o identità duplicati/orfani.
-- Rotazione e revoca effettiva delle credenziali, comprese le richieste già firmate se nel perimetro.
-- Quota su upload normale, multipart, copia, sovrascrittura e richieste concorrenti.
-- Persistenza dopo riavvio e procedura di backup/restore verificata su dati di prova.
-- Backend irraggiungibile e ripresa, senza perdere associazioni o riportare falsi successi.
-- Cancellazione conforme alla policy approvata, inclusi bucket non vuoti e versionati.
-
-Sono proposte per i futuri criteri di accettazione, non test già eseguiti.
-
-## Fonti da ricontrollare
-
-- [RustFS repository e licenza](https://github.com/rustfs/rustfs)
-- [Release RustFS](https://github.com/rustfs/rustfs/releases)
-- [Installazione container](https://docs.rustfs.com/en/installation/container)
-- [Matrice compatibilità S3](https://docs.rustfs.com/en/reference/s3-compatibility)
+- [RustFS repository](https://github.com/rustfs/rustfs)
+- [RustFS releases](https://github.com/rustfs/rustfs/releases)
+- [Container installation](https://docs.rustfs.com/en/installation/container)
+- [S3 compatibility](https://docs.rustfs.com/en/reference/s3-compatibility)
 - [IAM](https://docs.rustfs.com/en/security-compliance/iam)
-- [Quote per bucket](https://docs.rustfs.com/en/administration/data/bucket/quota)
+- [Bucket quotas](https://docs.rustfs.com/en/administration/data/bucket/quota)
 
-Le pagine online possono seguire lo sviluppo corrente e non la release installata: confrontare sempre documentazione, codice e comportamento osservato.
+Online documentation may track development rather than the deployed release.
+Compare documentation, code and observed behavior for the selected version.

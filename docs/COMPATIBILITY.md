@@ -1,115 +1,100 @@
-# Verifica iniziale RustFS 1.0.4
+# RustFS 1.0.4 compatibility
 
-**Aggiornamento: confine cliente verificato con il gateway HTTP approvato.**
+The service security model requires an **S3-only customer gateway** and a private
+administrative endpoint. The native IAM behavior described below has not been changed.
+See [verification](VERIFICATION.md) for the complete agent and core acceptance results.
 
-Questo documento conserva l'indagine iniziale sul backend diretto. I suoi comportamenti
-IAM non sono stati modificati: il contratto ora richiede che i clienti raggiungano solo
-il gateway, mentre l'agent usa l'endpoint amministrativo privato. L'agent Go è implementato;
-la suite completa e i relativi limiti sono in [VERIFICATION.md](VERIFICATION.md).
+## Reference environment
 
-## Ambiente e riproducibilità
-
-- Container ufficiale RustFS 1.0.4, indice OCI
+- Official RustFS 1.0.4 OCI index:
   `sha256:ed9210d6411d77ffceb70d94b964a3cb7d225983368bc25bebe01e995293dcc2`.
-- Piattaforma linux/amd64, manifest
+- Linux amd64 manifest:
   `sha256:e287e99762a4a3e7b706526e01f2ff755f67db165e9be9f6b907adc6fb6d6ee1`.
-- Docker 29.9.3, Compose v5.7.0; endpoint HTTP su loopback, volume di prova dedicato.
-- boto3 1.43.125 / botocore 1.43.125. Le altre dipendenze di test sono fissate
-  in `tests/requirements.txt`.
-- Dati sintetici, nomi casuali con prefisso `fulcrum-probe-` o `fc-boundary-`.
-  Credenziali generate localmente e mai mostrate o versionate.
-- Ogni prova pulisce solo le risorse che ha creato. Non usa risorse di produzione.
+- Docker 29.9.3, Compose v5.7.0, loopback HTTP endpoints and a dedicated persistent volume.
+- boto3 1.43.125 and botocore 1.43.125; remaining versions are in `tests/requirements.txt`.
+- Synthetic data with random `fulcrum-probe-` or `fc-boundary-` names.
+  Credentials are generated locally, never displayed or committed.
+- Each probe cleans up only resources it created. No production resources are used.
 
-## Prove iniziali superate
+## S3 and administrative behavior
 
-Comando: `.local/venv/bin/python tests/backend_contract.py`.
+`tests/backend_contract.py` covers:
 
-- Creazione bucket e round-trip dei tag necessari per l'ownership.
-- Impostazione e rilettura quota obbligatoria.
-- Attesa della disponibilità delle statistiche prima di usare un bucket nuovo:
-  subito dopo la creazione il PUT può restituire 503; dopo un breve intervallo ha avuto successo.
-- Utente IAM limitato al bucket: PUT/GET, diniego su altro bucket, diniego modifica tag/policy.
-  `ListBuckets` restituisce solo il proprio bucket, non l'altro bucket di prova.
-- Diniego di `add-user` e di creazione di service account aggiuntive con policy esplicita `Deny admin:*`.
-- `AssumeRole` STS rifiutato con `AccessDenied`: nessuna credenziale temporanea aggiuntiva.
-- URL prefirmati GET e PUT; upload multipart a una parte.
-- PUT oltre quota rifiutato senza creare l'oggetto.
-- Rotazione amministrativa preserva policy; vecchio secret e URL prefirmato rifiutati.
-- Suspend/resume senza reinvio del secret.
+- Bucket creation and ownership-tag round trips.
+- Mandatory quota configuration and readback.
+- Accounting readiness before using a new bucket. PUT can return 503 immediately
+  after creation and succeed once accounting becomes available.
+- Bucket-scoped IAM access: PUT/GET work, access to another bucket is denied,
+  and customer tag/policy changes are rejected. ListBuckets exposes only the permitted bucket.
+- Rejection of additional users, service accounts and STS credentials.
+- Presigned GET/PUT and multipart upload.
+- Rejection of oversized PUT without creating an object.
+- Administrative rotation preserving policy, with rejection of the old secret and URL.
+- Suspend/resume without resubmitting the secret.
 
-Queste erano le prove preliminari, non la verifica completa del contratto. Le prove
-aggiunte sull'agent e sul core reale sono elencate separatamente in VERIFICATION.md.
+The initial probes ran directly against RustFS. The acceptance scripts now use the
+customer gateway for customer requests and the private endpoint for setup and inspection.
 
-## Differenze API riscontrate
+## API details
 
-- Admin e STS richiedono statement separati, senza `Resource: "*"`.
-  Per le risorse S3 usare ARN. La policy non è stata indebolita: restano i Deny.
-- Il reset amministrativo utente `set-user-secret-key` usa `secret_key`
-  (snake_case), a differenza di `add-user` che usa `secretKey`.
-- Il superamento quota è `InvalidRequest`, con messaggio
-  `Bucket quota exceeded. ...`. La prova controlla entrambi e l'assenza dell'oggetto.
+- Use separate Admin and STS policy statements, without `Resource: "*"`.
+  Use S3 ARNs for S3 resources; keep the explicit Deny statements.
+- `set-user-secret-key` expects `secret_key` in snake_case, unlike `add-user`,
+  which expects `secretKey`.
+- Quota rejection uses `InvalidRequest` with a `Bucket quota exceeded. ...` message.
+  Tests check both the error and the absence of the rejected object.
+- `add-user` does not attach its policy. The agent performs an explicit policy binding.
 
-## Blocchi riprodotti: confini IAM
+## Native IAM limitations
 
-Le prove iniziali usavano direttamente RustFS. Il comando
-`.local/venv/bin/python tests/test_iam_boundaries.py` usa ora l'endpoint cliente
-(19080), mantenendo setup e controlli di stato sull'endpoint privato (19000).
-Le asserzioni non sono marcate xfail né saltate. Tre test passano attraverso il gateway,
-compresi gli alias dei percorsi amministrativi. Questo non è una correzione del backend.
+### IAM users can change their own secret
 
-### Utente IAM e cambio autonomo del secret
+With a dedicated user, a bucket-scoped policy and explicit Deny statements for
+`admin:*` and `sts:*`:
 
-Con un utente dedicato, policy limitata al bucket e Deny espliciti per `admin:*` e `sts:*`:
+1. Sign `POST /rustfs/admin/v3/account/password` with the customer's credentials.
+2. Submit the current and replacement secrets using the release's expected fields.
+3. The data-only service model requires rejection.
+4. The native endpoint returns HTTP 200, and the replacement secret authenticates successfully.
 
-1. Firmare con la credenziale cliente `POST /rustfs/admin/v3/account/password`.
-2. Inviare secret attuale e nuovo usando i campi previsti dalla release.
-3. Atteso dal contratto data-only: operazione negata.
-4. Osservato: HTTP 200; il nuovo secret autentica correttamente.
+This self-service operation is separate from administrative action checks. It does not
+grant access to another bucket, but it conflicts with agent-only credential administration.
 
-È una funzione self-service distinta dal controllo delle azioni amministrative,
-non una concessione di accesso ai dati degli altri bucket. Tuttavia contraddice
-l'amministrazione IAM esclusiva dell'agent descritta dal contratto.
+### Shared-parent service accounts can revoke siblings
 
-### Service account con parent amministrativo condiviso
+The alternative of separate bucket service accounts under a shared administrative parent
+also fails the required isolation:
 
-L'alternativa con una service account per bucket, entrambe figlie dello stesso
-utente amministrativo, non va usata senza ulteriori vincoli:
+1. Create A and B with separate policies and explicit `Deny admin:*`.
+2. Use A to request deletion of B's credentials.
+3. B should remain present and the request should be denied.
+4. The native endpoint returns HTTP 200; an administrative lookup of B then returns 404.
 
-1. Creare A e B con policy distinte e Deny esplicito `admin:*`.
-2. Con A richiedere la rimozione della credenziale B.
-3. Atteso: B resta presente, richiesta cliente negata.
-4. Osservato: HTTP 200; la successiva lettura amministrativa di B restituisce 404.
+The release's ownership fallback uses the shared parent. This observation does not apply
+to every possible IAM model. The agent uses dedicated IAM users, not this alternative.
 
-Il codice della release consente il fallback di ownership al parent. Questa
-prova riguarda il parent condiviso: non afferma che tutti i modelli IAM abbiano
-lo stesso comportamento. Non abbiamo adottato questa alternativa nell'agent.
+## Gateway enforcement
 
-## Decisione approvata
+The provider must keep customers away from the native RustFS endpoint and expose only the
+gateway's S3 routes. The agent continues to call private administrative APIs directly.
+No permission exception or backend/core/shared-library modification is required.
 
-L'utente ha scelto il confine di rete/API con gateway HTTP S3-only, senza TLS in questa fase.
-Il provider deve applicare lo stesso isolamento. Il runtime resta quello dell'agent VM,
-con utenti IAM dedicati; non sono stati adottati service account con parent condiviso.
+`tests/test_iam_boundaries.py` runs the negative cases through the customer endpoint
+on port 19080, while setup and state checks use private port 19000. All three tests pass,
+including administrative route aliases. They are not skipped or marked as expected failures.
 
-Le alternative considerate erano:
+`tests/network_boundary.sh` verifies that the customer network cannot reach the native
+backend, even by IP. These checks validate the deployment boundary, not a fix to RustFS's
+native IAM behavior or production readiness.
 
-- mantenere utenti IAM dedicati, ammettendo il cambio self-service del solo proprio
-  secret (fermi isolamento, quota, divieto di altre identità e controllo amministrativo);
-- mantenere il contratto data-only rigoroso introducendo un confine di rete/API tra
-  endpoint cliente S3 e API amministrative, da verificare e predisporre dal provider;
-- rivalutare backend/release.
+## Reproduce
 
-Nessuna eccezione ai permessi adottata e nessuna modifica a RustFS, core o libreria.
-È stato aggiunto il solo gateway infrastrutturale autorizzato. Non è stata dichiarata
-idoneità alla produzione.
+With the isolated fixtures running:
 
-## Controlli del banco di prova
+```sh
+.local/venv/bin/python tests/backend_contract.py
+.local/venv/bin/python tests/test_iam_boundaries.py
+bash tests/network_boundary.sh
+```
 
-- `python3 -m py_compile scripts/test-env.py tests/backend_contract.py tests/test_iam_boundaries.py`: superato.
-- `.local/venv/bin/pip check`: superato.
-- `docker compose --project-name fulcrum-s3-test --env-file .local/rustfs.env config --quiet`: superato.
-- `go mod verify`: superato (verifica dei moduli, non compilazione/test di un agent).
-- `.local/venv/bin/python tests/backend_contract.py`: superato dopo aver adattato il client al formato della release.
-- I due fallimenti iniziali sul backend diretto sono riportati sopra.
-- `tests/test_iam_boundaries.py`: ora tre test superati sul confine cliente autorizzato.
-- `tests/network_boundary.sh`: backend non raggiungibile dalla rete cliente, anche per IP.
-- Test Go, core end-to-end, build e suite completa: vedere VERIFICATION.md.
+Complete core integration, build and lifecycle checks are listed in [verification](VERIFICATION.md).

@@ -1,90 +1,84 @@
-# Contratto approvato — agent-s3 v1
+# Service contract — agent-s3 v1
 
-Approvato dall'utente durante il confronto di progettazione. Destinazione:
-https://github.com/fulcrumproject/agent-s3 (pubblico, organizzazione fulcrumproject).
+## Scope
 
-## Perimetro
+- Go, following agent-proxmox-fae's architecture: cmd/agent, internal/config,
+  internal/s3agent for handlers, health and metrics, and internal/rustfsapi behind an interface.
+- Reuse agent-lib-go/stdagent and Fulcrum utilities without extending their APIs.
+- AWS SDK for Go v2 for S3 and SigV4; an internal RustFS administrative client.
+- One shared backend per agent, one private bucket per service, one active replica per agentId.
+- Provider-managed backend and gateway. No Docker, host or cluster management in the agent.
+- RustFS 1.0.4, tested with a digest-pinned image.
+- HTTP and path-style requests on localhost or an isolated test network.
+  Separate administrative and customer endpoints; no Internet exposure or production qualification.
 
-- Go, stessa architettura di agent-proxmox-fae: cmd/agent, internal/config,
-  internal/s3agent (handler, health, metriche), internal/rustfsapi (client dietro interfaccia).
-- Riutilizzare agent-lib-go/stdagent e utility Fulcrum, senza modificare altri repository.
-- AWS SDK for Go v2 per S3 e firma SigV4; client amministrativo RustFS interno.
-- Un backend condiviso per agent, un bucket privato per servizio. Una replica attiva per agentId.
-- Backend predisposto dal provider. L'agent non gestisce Docker, host o cluster.
-- RustFS 1.0.4 da validare; immagine di test fissata per digest.
-- HTTP, path-style, localhost/rete di prova isolata. Endpoint backend ed endpoint cliente distinti.
-  Nessuna esposizione Internet né validazione per produzione in questa fase.
+## Acceptance criteria
 
-## Criteri di accettazione
+1. **Creation:** derive immutable bucket names and accessKeyId values from serviceId.
+   The display name is independent. Never implicitly adopt existing resources or use
+   their names alone as proof of ownership.
+2. **Secrets:** accept the customer's secret through an ephemeral property.
+   Never return it in agentInstanceData, persist it on the agent's disk or log it.
+   The customer keeps a copy and resubmits it when a retry needs a value already removed from the vault.
+3. **Access:** allow the agreed S3 operations only on the service's bucket: reading, writing,
+   listing and deleting objects, multipart uploads, and presigned PUT/GET URLs.
+   Deny other buckets, anonymous access, IAM/policy/ACL/bucket administration,
+   additional credentials, and direct bucket creation or deletion.
+4. **Quota:** require a positive byte limit, applied and read back before enabling access.
+   Never fall back to unlimited storage. Updates allow increases or no-ops;
+   rejected decreases must leave the backend limit unchanged.
+5. **Rotation:** update the secret for the same accessKeyId, with one active credential pair
+   and no overlap. Verify rejection of the old secret and its presigned URLs.
+6. **Suspend/resume:** disable and re-enable credentials without resubmitting the secret.
+   Preserve data and quota. Do not promise to interrupt in-flight requests;
+   unexpired URLs may become usable again after resumption.
+7. **Deletion:** force delete objects, versions/delete markers, incomplete multipart uploads,
+   the bucket, credentials and policy belonging to the service.
+   Never bypass retention or Object Lock. Disable access before deleting data.
+   Partial deletion failures must not re-enable access; a new delete resumes cleanup.
+   Never report success while resources remain.
+8. **Recovery:** make handlers idempotent for resources with verified ownership.
+   Never destructively retry against foreign or uncertain resources.
+   Do not introduce another recovery framework.
+9. **Monitoring:** OnHealth checks backend reachability and authentication.
+   OnMetrics reports backend usage, quota and their ratio. Never turn errors into zero samples.
+   Usage may lag and is not a billing measurement.
+10. **Logging:** prevent stdagent's resolved-configuration dump from reaching logs,
+    without changing the shared library, and cover it with a regression test.
+11. **Verification:** require unit tests and real tests against RustFS 1.0.4 and the unchanged core,
+    using AWS CLI and boto3. Cover two-service isolation, forbidden APIs, multipart/presigned requests,
+    quotas including concurrent writes, copies and overwrites, rotation, suspension,
+    force delete and partial failures. Report incompatibilities rather than weakening assertions
+    or modifying other repositories to conceal them.
+12. **Delivery:** provide a Go binary build, non-root Dockerfile, test Compose stack,
+    AgentType/ServiceType examples, documentation and an Apache-2.0 license.
+    Pin dependency versions.
 
-1. Create: nome bucket e accessKeyId derivati dal serviceId, immutabili; nome visualizzato indipendente.
-   Nessuna adozione implicita di risorse preesistenti, né prove di ownership basate solo sul nome.
-2. Secret fornito dal cliente tramite proprietà ephemeral. Mai restituito in agentInstanceData,
-   salvato su disco dall'agent o registrato nei log. Il cliente conserva la propria copia.
-   Quando il vault lo ha eliminato, il ritentativo richiede reinvio esplicito.
-3. Credenziali limitate alle operazioni S3 approvate sul proprio bucket: lettura, scrittura,
-   elenco, cancellazione degli oggetti, multipart, URL prefirmati PUT/GET.
-   Vietati altri bucket, accesso anonimo, gestione IAM/policy/ACL/configurazione bucket,
-   creazione di altre chiavi e creazione/eliminazione diretta dei bucket.
-4. Quota positiva obbligatoria in byte, applicata e riletta prima di abilitare il cliente.
-   Nessun fallback illimitato. Update: aumento o no-op, riduzione rifiutata senza ridurre il limite backend.
-5. Rotazione tramite update: accessKeyId invariato, nuovo secret cliente, una sola coppia attiva,
-   nessuna sovrapposizione. Verificare rifiuto della vecchia firma e dei vecchi URL prefirmati.
-6. Suspend/resume: disabilitazione/riabilitazione reversibile delle credenziali, senza reinvio secret.
-   Dati e quota invariati. Nessuna promessa di interrompere richieste già in corso;
-   URL non scaduti possono tornare validi al resume.
-7. Delete significa force delete: oggetti, eventuali versioni/delete marker, multipart incompleti,
-   bucket, credenziali e policy del solo servizio. Non bypassare retention/Object Lock.
-   Disabilitare l'accesso prima di cancellare dati. Fallimenti parziali lasciano accesso bloccato,
-   senza riattivazione automatica; un nuovo delete riprende la pulizia. Non dichiarare falsi successi.
-8. Handler idempotenti e recuperabili su risorse di ownership verificata. Non ripetere distruttivamente
-   un'operazione su risorse estranee o di ownership incerta. Nessun framework di recovery nuovo.
-9. OnHealth: backend e autenticazione. OnMetrics: uso riportato dal backend, quota, rapporto uso/quota.
-   Non inventare zeri in caso di errore; statistiche potenzialmente ritardate, non valide per fatturazione.
-10. Logger locale sicuro: stdagent registra la configurazione dopo la risoluzione dei secret;
-    impedirne l'emissione senza modificare la libreria e coprire il caso con un test.
-11. Test unitari e test reali su RustFS 1.0.4 e core invariato obbligatori. Client AWS CLI e boto3.
-    Coprire isolamento di due servizi, API vietate, multipart/presigned, quote (anche concorrenza,
-    copia e sovrascrittura), rotazione, suspend/resume, force delete e fallimenti parziali.
-    Documentare esiti reali: le incompatibilità bloccano il completamento, senza aggiramenti o
-    modifiche degli altri repository.
-12. Consegna: binario Go, Dockerfile non-root, Compose di prova, esempi AgentType/ServiceType,
-    documentazione e licenza Apache-2.0. Versioni delle dipendenze fissate.
+## Core and runtime limitations
 
-## Limiti accettati del core e del runtime
+stdagent processes Pending jobs; it does not automatically resume Processing jobs after a crash.
+When enabled, the core maintenance worker can mark timed-out jobs Failed, allowing an explicit retry.
+The timeout uses createdAt rather than claimedAt. That path does not apply lifecycle transitions
+or clean up secrets: ephemeral is not a guaranteed expiration time after a crash.
+Configure fixture timeouts explicitly.
 
-stdagent esegue job Pending, non riprende automaticamente Processing dopo un crash.
-Il worker di manutenzione del core, se abilitato, può marcare i job scaduti Failed;
-successivamente si può richiedere un nuovo tentativo. Il timeout corrente usa createdAt,
-non claimedAt. La sua procedura non applica le transizioni lifecycle né la pulizia dei
-secret: ephemeral non garantisce una scadenza temporale dopo un crash.
-La configurazione dei timeout del banco di prova deve essere esplicita.
+Do not introduce hidden persistent secret copies to work around these limitations.
+Report backend or core blockers instead of extending those repositories.
 
-Nessun secret persistente nascosto per aggirare questi limiti. Eventuali blocchi del backend
-o del core vanno riportati, non risolti cambiando gli altri repository.
+## Customer boundary
 
-## Integrazione approvata dopo la verifica IAM
+Customers reach only the gateway's S3 endpoint. The native RustFS administrative endpoint
+is private to the agent and trusted operators. The gateway preserves S3 signatures and
+traffic while blocking administrative, self-service and STS routes.
 
-L'utente ha autorizzato un gateway HTTP nel banco di prova e un analogo confine
-infrastrutturale predisposto dal provider. I clienti raggiungono soltanto l'endpoint
-S3 del gateway; l'endpoint amministrativo RustFS è privato e raggiungibile
-dall'agent/operatori fidati, non dai clienti. Nessun TLS in questa fase.
-Il gateway preserva firma e flusso S3, blocca API amministrative, self-service e STS.
-L'agent resta control-plane e non trasporta oggetti. Usare utenti IAM dedicati;
-non adottare service account con parent condiviso. Le prove IAM passano dal
-confine cliente; i comportamenti del backend diretto restano documentati.
-L'accesso diretto dei clienti a RustFS invalida il modello di sicurezza.
+The agent remains a control-plane component and does not proxy objects.
+Use dedicated IAM users, not service accounts with a shared administrative parent.
+Run IAM boundary tests through the customer endpoint and retain the documented native
+backend behavior. Direct customer access to RustFS invalidates the security model.
 
-## Esclusioni
+## Exclusions
 
-Versioning/lifecycle/Object Lock/cifratura gestiti dal cliente, TLS e relativa infrastruttura,
-HA dell'agent/backend, gestione di host/container/cluster, import di bucket, nomi personalizzati,
-quote riducibili o illimitate, multiple credenziali simultanee, metriche di traffico/richieste,
-garanzie di durabilità, fatturazione o compatibilità S3 completa, Helm e pacchetti DEB/RPM.
-
-## Pubblicazione
-
-Repository pubblico creato. L'utente ha autorizzato commit locali su main e push.
-La distribuzione resta subordinata alle verifiche e alla revisione dei contenuti.
-Prima di distribuire binari/immagini chiarire la licenza di fulcrumproject/utils:
-il repository è pubblico ma non dichiara una licenza. Non modificarlo.
+Customer-managed versioning, lifecycle, Object Lock or encryption; TLS infrastructure;
+agent/backend HA; host/container/cluster management; bucket imports or custom names;
+decreasing or unlimited quotas; overlapping credentials; request/traffic metrics;
+durability, billing or complete S3-compatibility guarantees; Helm and DEB/RPM packages.

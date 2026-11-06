@@ -1,158 +1,176 @@
-# Operazioni e sicurezza
+# Operations and security
 
-## Prerequisiti del provider
+## Provider prerequisites
 
-- RustFS 1.0.4 predisposto e raggiungibile dall'agent via API.
-- Endpoint cliente separato, con il confine equivalente a `deploy/gateway.conf`.
-  I clienti non devono poter raggiungere le porte native, la console o API compatibili MinIO.
-- Una replica attiva per agentId. Riservare i nomi `fulcrum-<serviceId>`, `fc<serviceId senza trattini>`
-  e `fc-<serviceId senza trattini>` alle risorse gestite; non modificarle contemporaneamente a mano.
-- Mantenere lo stesso backend per l'intera vita dell'agent. Endpoint privato, endpoint cliente e region
-  sono immutabili nello schema fornito. Per un backend diverso registrare un altro agent.
-  Non sostituire il backend dietro lo stesso URL/DNS senza riconciliare i servizi: non è una migrazione
-  gestita dall'agent, e non viene verificata un'identità fisica del cluster.
-- Credenziali amministrative adatte alle operazioni richieste. Il banco usa credenziali amministrative
-  casuali; non certifica una policy amministrativa di produzione a privilegi minimi.
-- Vault del core configurato. L'agent non implementa un archivio di secret alternativo.
-- Timeout del core coerenti con attesa in coda e durata delle operazioni.
+- Deploy RustFS 1.0.4 with API access from the agent.
+- Provide a separate customer endpoint with a boundary equivalent to `deploy/gateway.conf`.
+  Customers must not reach native ports, the console or MinIO-compatible administrative APIs.
+- Run one active replica per agentId. Reserve `fulcrum-<serviceId>`,
+  `fc<serviceId without hyphens>` and `fc-<serviceId without hyphens>` for managed resources;
+  do not modify them manually while the agent is operating.
+- Keep the same backend throughout the agent's lifetime. The supplied schema makes the
+  private endpoint, customer endpoint and region immutable. Register another agent for
+  a different backend. Replacing a backend behind the same URL/DNS requires reconciliation:
+  the agent does not manage migrations or verify a physical cluster identity.
+- Supply administrative credentials with the necessary permissions. The fixtures use
+  randomly generated administrative credentials, not a certified least-privilege production policy.
+- Configure the core vault; the agent has no alternative secret store.
+- Align core timeouts with queueing time and operation duration.
 
-HTTP è ammesso solo in questa fase isolata. Il gateway non cifra traffico e non rende
-sicura un'esposizione Internet. Non è un deployment di produzione, un backup o un failover.
+HTTP is limited to isolated development and testing. The gateway does not encrypt traffic
+or make Internet exposure safe. The fixture is not a production deployment, backup or failover.
 
-Il gateway preserva Host e URI per SigV4, inoltra le richieste S3 nel namespace
-`fulcrum-*` e GET / per ListBuckets, bloccando le altre rotte e POST / (STS).
-Non registra URL firmati. I controlli IAM restano necessari: il gateway non sostituisce
-la policy di isolamento del bucket. Dopo la ricreazione del container backend con un
-nuovo IP, riavviare/ricaricare il gateway; la fixture non implementa service discovery HA.
+The gateway preserves Host and URI for SigV4. It forwards S3 requests in the `fulcrum-*`
+namespace and GET / for ListBuckets, while blocking other routes and POST / (STS).
+It does not log signed URLs. IAM remains necessary: the gateway does not replace bucket
+isolation policies. Reload or restart the gateway if recreating the backend container changes
+its IP; the fixture does not provide HA service discovery.
 
-## Configurazione
+## Configuration
 
-Configurazione locale, prefisso `S3_AGENT_`:
+Local settings use the `S3_AGENT_` prefix:
 
-| Variabile | Default |
+| Variable | Default |
 | --- | --- |
 | `FULCRUM_API_URL` | `http://127.0.0.1:8080` |
-| `FULCRUM_API_TOKEN` | obbligatorio |
+| `FULCRUM_API_TOKEN` | Required |
 | `JOB_POLL_INTERVAL` | `5s` |
 | `METRIC_REPORT_INTERVAL` | `30s` |
 | `HEALTH_INTERVAL` | `15s` |
 
-Le variabili effettive includono il prefisso, ad esempio `S3_AGENT_JOB_POLL_INTERVAL`.
-Sono disponibili il file locale `-config`, il file ignorato `.env` e le opzioni di logging
-delle utility Fulcrum. Nessun valore sensibile va inserito nel repository.
+For example, the full variable name is `S3_AGENT_JOB_POLL_INTERVAL`.
+The `-config` file option, ignored `.env` file and Fulcrum logging settings are also available.
+Keep sensitive values out of the repository.
 
-Configurazione remota `configuration.rustfs`:
+Remote settings under `configuration.rustfs`:
 
-- `endpoint`: origin HTTP(S) privata, senza userinfo, path, query o fragment;
-- `clientEndpoint`: origin cliente distinta, protetta dal gateway/rete;
-- `accessKey`, `secretKey`: secret persistenti amministrativi risolti dalla libreria;
-- `region`: default `us-east-1`;
-- `httpTimeoutSeconds`: default 15;
-- `operationTimeoutSeconds`: default 180, almeno pari al timeout HTTP.
+- `endpoint`: private HTTP(S) origin without userinfo, path, query or fragment;
+- `clientEndpoint`: separate customer origin protected by the gateway and network boundary;
+- `accessKey`, `secretKey`: persistent administrative secrets resolved by the shared library;
+- `region`: defaults to `us-east-1`;
+- `httpTimeoutSeconds`: defaults to 15;
+- `operationTimeoutSeconds`: defaults to 180 and must be at least the HTTP timeout.
 
-Credenziali e timeout si applicano alla connessione iniziale: riavviare dopo una modifica.
-Endpoint e region sono immutabili nello schema della prima versione.
-La normalizzazione degli URL non può dimostrare l'isolamento della rete: resta un requisito del provider.
+Credentials and timeouts are loaded at initial connection; restart after changing them.
+Endpoints and region are immutable in the supplied schema.
+URL validation cannot establish network isolation; the provider must enforce it.
 
-## Provisioning e ownership
+## Provisioning and ownership
 
-L'agent controlla prima l'assenza o l'appartenenza di bucket, policy e identità.
-Il bucket porta tag con serviceId, agentId e fase; la policy contiene un marker di
-ownership e deve coincidere con l'intero documento atteso. L'utente deve avere
-esclusivamente quella policy e nessun gruppo. Il solo nome non prova l'appartenenza.
+The agent first checks whether buckets, policies and identities are absent or belong to
+the service. Bucket tags identify the serviceId, agentId and phase. The policy has an
+ownership marker and must match the complete expected document. The user must have
+only that policy and no groups. A matching name alone is not proof of ownership.
 
-L'identità viene creata disabilitata, la policy viene associata esplicitamente,
-la quota positiva viene applicata e riletta. Si attende la disponibilità delle statistiche
-prima di abilitare l'accesso. Niente fallback illimitato.
+The identity is created disabled, its policy is explicitly attached, and the positive
+quota is applied and read back. Usage accounting must become available before access
+is enabled. There is no unlimited fallback.
 
-Le API di creazione e tagging/binding non sono una transazione unica:
-- crash dopo CreateBucket ma prima dei tag;
-- crash dopo add-user ma prima del binding della policy.
+Creation and tagging/binding are not a single transaction. A crash can occur:
 
-In queste finestre un retry rifiuta l'adozione della risorsa incerta. Un operatore deve
-verificare e riconciliare le sole risorse coinvolte prima di ritentare. Non aggiungere
-fallback basati soltanto sul prefisso o cancellazioni ricorsive per risolvere il conflitto.
+- after CreateBucket but before ownership tags are written;
+- after add-user but before the policy is attached.
 
-L'idempotenza riguarda gli handler sullo **stesso serviceId**. Due POST di creazione
-del servizio nel core possono produrre due servizi distinti; non viene aggiunta
-idempotenza alla API del core. Un core già in stato terminale può rifiutare ulteriori azioni.
+Retries refuse to adopt resources with uncertain ownership. An operator must inspect
+and reconcile only the affected resources before retrying. Do not resolve these conflicts
+with prefix-based adoption or indiscriminate recursive deletion.
 
-## Secret e aggiornamenti
+Idempotence applies to handlers for the **same serviceId**. Two service-creation POSTs
+to the core may create different services; the agent does not add idempotence to the
+core API. The core may reject further actions on a terminal service.
 
-Usare un secret casuale forte generato dal cliente. Il minimo di compatibilità è 8 caratteri,
-non una garanzia di entropia. L'agent riceve il valore dal vault solo per l'operazione;
-non lo restituisce nei dati runtime, non lo salva localmente e non lo registra.
+## Secrets and updates
 
-La rotazione sostituisce il secret del medesimo accessKeyId. Non c'è sovrapposizione.
-Conserva lo stato disabilitato di un servizio sospeso. Non promette di annullare richieste
-già in corso; gli URL prefirmati sono credenziali bearer da proteggere.
+Use a strong random secret generated by the customer. The compatibility minimum is
+8 bytes, not an entropy guarantee. The agent uses the vault-resolved value for
+the operation; it does not return, log or persist it locally.
 
-Quota e secret non formano una transazione distribuita. Un aggiornamento può avere effetti
-parziali: il job deve fallire esplicitamente, senza rollback nascosto né riduzione della quota.
-Il retry confronta il limite effettivo del backend; se serve il secret, il cliente reinvia
-lo stesso valore desiderato. Non c'è fencing distribuito delle mutazioni RustFS: una richiesta
-scaduta può avere esito incerto. Non inviare aggiornamenti confliggenti finché l'operatore
-non ha riconciliato l'esito precedente.
+Rotation replaces the secret for the same accessKeyId, without overlap. It preserves
+a suspended service's disabled state. In-flight requests are not necessarily interrupted.
+Treat presigned URLs as bearer credentials.
 
-Il core attuale applica le proprietà tentate anche sulle transizioni di errore dell'azione
-`update`. Dopo un errore, la proprietà desiderata può differire dal backend: verificare
-il job e le metriche/lo stato effettivo. Per esempio, dopo una riduzione rifiutata,
-reinviare la quota effettiva prima di un altro aggiornamento.
+Quota and secret updates are not a distributed transaction. An update can have partial
+effects: the job must fail explicitly, without hidden rollback or quota reduction.
+A retry checks the actual backend limit and, when needed, resubmits the same desired
+secret. RustFS mutations have no distributed fencing here, so a timed-out request can
+have an uncertain outcome. Do not issue conflicting updates until an operator has
+reconciled the previous outcome.
 
-## Cancellazione
+The current core applies attempted properties even on error transitions for `update`.
+Desired properties may therefore differ from the backend after a failed job.
+Check the job and observed state/metrics. For example, after a rejected decrease,
+resubmit the actual quota before another update.
 
-`DELETE /api/v1/services/{id}` avvia **force delete**, senza conferme aggiuntive nell'agent.
+## Deletion
 
-1. Verifica ownership prima di qualsiasi modifica.
-2. Scrive e rilegge il marcatore persistente `deleting`.
-3. Disabilita l'identità e verifica lo stato prima di rimuovere dati.
-4. Aborta multipart; elimina versioni e delete marker a pagine, controllando gli errori per oggetto.
-5. Rimuove utente e policy, mantenendo il bucket come prova di ownership fino al termine della pulizia IAM.
-6. Elimina il bucket e verifica l'assenza di tutte le risorse.
+`DELETE /api/v1/services/{id}` starts **force delete**, with no additional agent-side confirmation.
 
-Non usa `BypassGovernanceRetention`. Con un hold/retention attivo può eliminare alcuni
-oggetti e poi fallire: non ripristina i dati e non riattiva l'accesso. Il provider deve
-risolvere il vincolo legittimamente; un nuovo delete riprende la pulizia.
+1. Verify ownership before any modification.
+2. Write and read back the persistent `deleting` marker.
+3. Disable the identity and verify its status before removing data.
+4. Abort multipart uploads; delete versions and delete markers in pages, checking per-object errors.
+5. Remove the user and policy, retaining the bucket as ownership evidence until IAM cleanup succeeds.
+6. Delete the bucket and verify that all resources are absent.
 
-Un errore prima della disabilitazione può lasciare l'accesso originale, ma non viene
-iniziato lo svuotamento. Il marcatore impedisce a create/update/resume di riattivare un
-bucket dopo l'avvio della cancellazione, anche se il core presenta uno stato vecchio.
-Il marcatore non viene cancellato per aggirare un errore.
+The agent does not use `BypassGovernanceRetention`. Active retention or a hold can allow
+some objects to be removed before the job fails. The agent neither restores deleted data
+nor re-enables access. The provider must resolve the restriction legitimately; a new delete
+continues cleanup.
 
-## Timeout e recupero ereditati dal core
+A failure before disablement may leave the original access in place, but no data cleanup
+starts. The marker prevents create/update/resume from reactivating a bucket after deletion
+has begun, even if the core shows stale state. It is not cleared to work around an error.
 
-`stdagent` non riprende automaticamente job Processing dopo un crash. Se abilitato,
-il worker del core può marcarli Failed; poi occorre un nuovo tentativo esplicito.
-Il timeout usa createdAt, non claimedAt. La procedura di timeout non applica transizioni
-lifecycle né pulizia dei secret: `ephemeral` non è una garanzia di scadenza temporale.
+## Core timeouts and recovery
 
-Dopo CreateFailed, reinviare le proprietà necessarie con PATCH (nuova quota valida e secret,
-quando richiesto). Le azioni generiche del core non trasportano nuovi parametri.
-Un backend già interamente configurato può essere riconosciuto dopo una perdita dell'ack,
-senza recuperare o memorizzare il secret.
+stdagent does not automatically resume Processing jobs after a crash. If enabled, the
+core maintenance worker can mark them Failed, after which a new explicit attempt is required.
+Timeouts use createdAt, not claimedAt. The timeout path neither applies lifecycle transitions
+nor cleans up secrets, so `ephemeral` does not guarantee time-based expiration.
 
-Nessuna modifica a core o agent-lib-go viene effettuata per nascondere questi limiti.
+After CreateFailed, resubmit the necessary properties through PATCH: a valid quota and,
+when required, the secret. Generic core actions do not carry new parameters.
+An already configured backend can be recognized after a lost acknowledgement without
+recovering or storing the secret.
 
-## Salute e metriche
+## Health and metrics
 
-OnHealth controlla raggiungibilità/autenticazione del backend, non tutta la rete cliente
-o lo stato di ogni nodo di un cluster. OnMetrics invia:
+OnHealth checks backend reachability and authentication, not the entire customer network
+or every node in a cluster. OnMetrics sends:
+
 - `s3.storage.used_bytes`;
 - `s3.storage.quota_bytes`;
-- `s3.storage.usage_ratio` (non limitato artificialmente a 1).
+- `s3.storage.usage_ratio`, without clamping it to 1.
 
-Errori o campi mancanti non producono zeri inventati. I valori possono essere ritardati,
-non misurano tutte le risorse fisiche e non sono certificati per fatturazione.
-RustFS può rispondere 503 durante indisponibilità temporanee dell'accounting:
-usare retry client limitati, senza disabilitare il controllo della quota.
+Errors and missing fields do not produce zero samples. Values may lag, do not represent
+all physical storage costs and are not certified for billing.
+RustFS can return 503 while accounting is temporarily unavailable. Use bounded client
+retries, not disabled quota enforcement.
 
-## Fixture
+## Test fixtures
 
-Lo scanner del banco usa ciclo di 2 secondi e velocità fastest per ridurre le attese.
-Questo non cambia la policy di quota e non è una raccomandazione di tuning produttivo.
+The scanner uses a two-second cycle and fastest speed to reduce test waits.
+This does not change the quota policy and is not production tuning guidance.
 
-Core, PostgreSQL e RustFS hanno volumi locali dedicati. Il bootstrap preesistente del core
-dura 24 ore; un banco riutilizzato può richiedere nuove credenziali amministrative o una
-ricreazione esplicita dei soli dati di prova. Nessuno script resetta un database condiviso.
-La CI elimina soltanto i propri volumi al termine. Le prove non auditano tutta la sicurezza
-del core né la licenza della dipendenza utils.
+Core, PostgreSQL and RustFS use dedicated persistent volumes. The core's existing
+bootstrap credential lasts 24 hours; a reused fixture may need new administrative
+credentials or an explicit reset of test data. No script resets a shared database.
+CI removes only its own fixture volumes.
+
+Generated database, vault and backend credentials remain in ignored `.local/*.env`
+files with mode 0600. Do not print `docker compose config` without `--quiet`, since
+the expanded output contains credentials.
+
+The acceptance suite restarts the agent and stops/restarts its dedicated backend.
+Do not run concurrent E2E suites against the same fixture. Tests check container identity,
+Compose project and loopback bindings before API writes, and clean up only resources
+created by their execution. A failed run may retain resources for inspection and reports
+their service IDs rather than deleting indiscriminately.
+
+Stop the fixture without deleting its volumes:
+
+```sh
+docker compose --project-name fulcrum-s3-test \
+  --env-file .local/rustfs.env --env-file .local/core.env \
+  -f compose.yaml -f compose.e2e.yaml stop
+```
