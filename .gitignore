@@ -1,0 +1,8 @@
+.local/
+.env
+.env.*
+!.env.example
+/bin/
+/coverage.out
+__pycache__/
+*.pyc
